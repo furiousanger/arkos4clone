@@ -1,0 +1,92 @@
+name: Build hypseus-singe
+
+# Built in an Ubuntu 20.04 arm64 container against the SDL3 versions shipped
+# by ArkOS4Clone. No RPATH: the system libSDL3 is used at runtime.
+
+on:
+  workflow_dispatch:
+    inputs:
+      hypseus_ref:
+        description: 'Tag or branch of DirtBagXon/hypseus-singe'
+        required: false
+        default: 'v3.0.2'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Build
+        env:
+          HYP_REF: ${{ inputs.hypseus_ref }}
+        run: |
+          mkdir -p "$PWD/out"
+          docker run --rm -i -e HYP_REF -v "$PWD/out:/out" ubuntu:20.04 bash -s <<'EOS'
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            build-essential git ca-certificates pkg-config autoconf automake libtool \
+            patchelf python3-pip python3-setuptools \
+            libvorbis-dev libogg-dev libzip-dev zlib1g-dev \
+            libfreetype6-dev libharfbuzz-dev libpng-dev libjpeg-dev \
+            libasound2-dev libdrm-dev libgbm-dev libudev-dev \
+            libegl1-mesa-dev libgles2-mesa-dev
+          pip3 install -q cmake ninja
+          export PATH=/usr/local/bin:$PATH
+
+          P=/opt/sdl
+          export CMAKE_PREFIX_PATH=$P
+          export PKG_CONFIG_PATH=$P/lib/pkgconfig
+          export LD_LIBRARY_PATH=$P/lib
+          mkdir -p /src
+
+          b() {
+            n=$1; t=$2; shift 2
+            git clone -q --depth 1 --branch "$t" "https://github.com/libsdl-org/$n.git" "/src/$n"
+            cmake -S "/src/$n" -B "/src/$n/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX=$P "$@"
+            cmake --build "/src/$n/build"
+            cmake --install "/src/$n/build"
+          }
+
+          b SDL release-3.4.16 \
+            -DSDL_UNIX_CONSOLE_BUILD=ON -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
+            -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_PULSEAUDIO=OFF -DSDL_PIPEWIRE=OFF \
+            -DSDL_JACK=OFF -DSDL_SNDIO=OFF
+          b SDL_ttf release-3.2.2 \
+            -DSDLTTF_VENDORED=OFF -DSDLTTF_SAMPLES=OFF -DSDLTTF_PLUTOSVG=OFF
+          b SDL_image release-3.4.6 \
+            -DSDLIMAGE_VENDORED=OFF -DSDLIMAGE_SAMPLES=OFF -DSDLIMAGE_AVIF=OFF \
+            -DSDLIMAGE_JXL=OFF -DSDLIMAGE_TIF=OFF -DSDLIMAGE_WEBP=OFF
+          b SDL_mixer release-3.2.4 \
+            -DSDLMIXER_VENDORED=OFF -DSDLMIXER_SAMPLES=OFF -DSDLMIXER_PLAYERS=OFF \
+            -DSDLMIXER_GME=OFF -DSDLMIXER_MOD=OFF -DSDLMIXER_MIDI=OFF \
+            -DSDLMIXER_OPUS=OFF -DSDLMIXER_FLAC=OFF -DSDLMIXER_WAVPACK=OFF
+
+          git clone -q --depth 1 --branch "$HYP_REF" \
+            https://github.com/DirtBagXon/hypseus-singe.git /src/hyp
+
+          # Same flags as the build tested on the device
+          mkdir /src/hyp/build
+          cd /src/hyp/build
+          cmake ../src -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-g -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-g -fno-omit-frame-pointer"
+          make -j"$(nproc)"
+          patchelf --remove-rpath hypseus
+          strip --strip-unneeded hypseus
+          cp hypseus /out/hypseus-singe
+          chmod +x /out/hypseus-singe
+
+          {
+            gcc --version | head -1
+            readelf -p .comment /out/hypseus-singe || true
+            readelf -d /out/hypseus-singe | grep -E "NEEDED|RPATH|RUNPATH"
+          } > /out/build-info.txt
+          EOS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hypseus-singe
+          path: out/
